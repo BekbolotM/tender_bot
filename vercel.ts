@@ -12,5 +12,11 @@ import type { VercelConfig } from "@vercel/config/v1";
  */
 export const config: VercelConfig = {
   framework: "nextjs",
-  crons: [{ path: "/api/cron", schedule: "0 6 * * *" }],
+  // Hobby-тариф разрешает два задания, каждое не чаще раза в сутки, поэтому
+  // берём оба слота: утро и вечер. Это потолок бесплатного тарифа — для
+  // проверок каждые 15 минут нужен внешний планировщик (см. README).
+  crons: [
+    { path: "/api/cron", schedule: "0 4 * * *" },
+    { path: "/api/cron-evening", schedule: "0 13 * * *" },
+  ],
 };
