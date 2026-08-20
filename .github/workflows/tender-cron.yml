@@ -1,0 +1,17 @@
+name: Проверка тендеров
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Запуск
+        run: |
+          code=$(curl -s -o response.json -w "%{http_code}" --max-time 300 "${{ secrets.CRON_URL }}")
+          echo "HTTP $code"
+          cat response.json
+          test "$code" = "200"
