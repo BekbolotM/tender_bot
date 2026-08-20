@@ -45,6 +45,42 @@ function textOf(node: cheerio.Cheerio<AnyNode>): string {
   return node.text().replace(/\s+/g, " ").trim();
 }
 
+/** И дата, и цена — это всегда числа. На этом держится отсечение подписей ниже. */
+const HAS_DIGIT = /\d/;
+
+/**
+ * Значение даты или цены из ячейки карточки. От `textOf` отличается двумя
+ * вещами, которые человек на странице видит, а разметка прячет:
+ *
+ * 1. Перенос строки он читает как пробел. Без этого ячейка вида
+ *    `2026-08-21<br>16:40:31` уходила бы в уведомление как «2026-08-2116:40:31».
+ * 2. Подпись колонки часто лежит в той же ячейке, что и само значение:
+ *    `<span>Срок подачи предложений поставщиков</span>24.08.2026 17:41`. Так
+ *    делают таблицы, которые умеют перестраиваться под узкий экран. У значения
+ *    своего элемента нет, поэтому отсечь подпись правилом разбора нельзя — и в
+ *    уведомление шла склейка «Срок подачи предложений поставщиков24.08.2026».
+ *
+ * Подписью считаем только элемент в самом начале ячейки, в котором нет ни одной
+ * цифры. Убрать вместе с ним значение такое правило не может: в выброшенном
+ * куске цифр не было, а значит цифры остались там, где и были.
+ */
+function fieldText(node: cheerio.Cheerio<AnyNode>): string {
+  if (node.length === 0) return "";
+
+  const cell = node.first().clone();
+  cell.find("br").replaceWith(" ");
+
+  if (HAS_DIGIT.test(cell.text())) {
+    let head = cell.children().first();
+    while (head.length > 0 && !HAS_DIGIT.test(head.text())) {
+      head.remove();
+      head = cell.children().first();
+    }
+  }
+
+  return textOf(cell);
+}
+
 /**
  * Ссылка уходит в `<a href>` уведомления, а Telegram отвергает всё сообщение
  * целиком, если протокол не http(s). Заглушки вида `javascript:void(0)` на
@@ -82,8 +118,8 @@ export function extractItems(html: string, baseUrl: string, selectors: Selectors
       items.push({
         title,
         url: absoluteUrl(href, baseUrl),
-        date: selectors.date ? textOf(card.find(selectors.date).first()) || null : null,
-        price: selectors.price ? textOf(card.find(selectors.price).first()) || null : null,
+        date: selectors.date ? fieldText(card.find(selectors.date)) || null : null,
+        price: selectors.price ? fieldText(card.find(selectors.price)) || null : null,
         text: textOf(card).slice(0, 2000),
       });
     });

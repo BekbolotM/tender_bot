@@ -45,6 +45,23 @@ const COUNTRY_ORDER = ["Кыргызстан", "Казахстан", "ЕАЭС"]
  */
 export const CATALOG: CatalogEntry[] = [
   {
+    id: "kg-procurement",
+    title: "Все тендеры Кыргызстана (procurement.kg)",
+    country: "Кыргызстан",
+    listUrl: "https://procurement.kg/",
+    selectors: {
+      item: "li.min-w-0.border-t",
+      title: "a.text-primary.underline",
+      link: "a.text-primary.underline",
+      // Дата и сумма стоят одной строкой («20.08.2026 · 92 930 сом»), поэтому
+      // цену отдельно не забираем — в уведомлении она задвоилась бы.
+      date: "p.mt-1.text-sm",
+    },
+    note:
+      "Собирает закупки со всей страны и обновляется раз в час. Показывает только последние тендеры, " +
+      "поиска по адресу страницы нет — отбор идёт по вашим ключевым словам уже в боте.",
+  },
+  {
     id: "kg-zakupki",
     title: "Госзакупки Кыргызстана",
     country: "Кыргызстан",
