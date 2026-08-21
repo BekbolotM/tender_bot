@@ -19,6 +19,12 @@ export type Site = {
   selectors: Selectors;
   /** Как обходить сайт: страницей списка или через его собственный поиск. */
   search: SiteSearch;
+  /**
+   * Площадку обходит не сервер, а сборщик на компьютере владельца: она пускает
+   * только обычных посетителей. Страницы таких сайтов приходят в /api/ingest,
+   * а серверный крон их не трогает.
+   */
+  via_local: boolean;
   enabled: boolean;
   last_checked_at: string | null;
   last_error: string | null;

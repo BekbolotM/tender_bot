@@ -1,4 +1,4 @@
-import { sql } from "./db";
+import { sql, withSchema } from "./db";
 import { env } from "./env";
 import type { Keyword, Selectors, Site, SiteSearch } from "./types";
 
@@ -156,23 +156,43 @@ export async function countActiveInvites(): Promise<number> {
 
 /* ---------- сайты ---------- */
 
+/**
+ * Все запросы к `sites` идут через `withSchema`. Эта таблица растёт вместе с
+ * кодом (последним появился `via_local`), и выкладка новой версии не должна
+ * выключать бота до тех пор, пока владелец вручную не откроет /api/setup:
+ * первый же запрос сам докатит схему и повторится. Добавляете колонку в другую
+ * таблицу — оберните её запросы так же.
+ */
+
 /** Со строк, добавленных до миграции, режим может прийти null — карточка сайта не должна падать. */
-function withSearch(row: Site): Site {
-  return { ...row, search: row.search ?? { mode: "off" } };
+function withDefaults(row: Site): Site {
+  return { ...row, search: row.search ?? { mode: "off" }, via_local: row.via_local ?? false };
 }
 
 export async function listSites(): Promise<Site[]> {
-  const rows = (await sql()`
-    SELECT id, title, list_url, selectors, search, enabled, last_checked_at, last_error
-    FROM sites ORDER BY id`) as Site[];
-  return rows.map(withSearch);
+  const rows = (await withSchema(() => sql()`
+    SELECT id, title, list_url, selectors, search, via_local, enabled, last_checked_at, last_error
+    FROM sites ORDER BY id`)) as Site[];
+  return rows.map(withDefaults);
 }
 
 export async function getSite(id: number): Promise<Site | null> {
-  const rows = (await sql()`
-    SELECT id, title, list_url, selectors, search, enabled, last_checked_at, last_error
-    FROM sites WHERE id = ${id}`) as Site[];
-  return rows[0] ? withSearch(rows[0]) : null;
+  const rows = (await withSchema(() => sql()`
+    SELECT id, title, list_url, selectors, search, via_local, enabled, last_checked_at, last_error
+    FROM sites WHERE id = ${id}`)) as Site[];
+  return rows[0] ? withDefaults(rows[0]) : null;
+}
+
+/**
+ * Задания для домашнего сборщика: только включённые площадки, которые сервер
+ * обойти не может. Выключенную площадку сборщику качать незачем — присланную
+ * страницу приём всё равно отвергнет.
+ */
+export async function listLocalSites(): Promise<Site[]> {
+  const rows = (await withSchema(() => sql()`
+    SELECT id, title, list_url, selectors, search, via_local, enabled, last_checked_at, last_error
+    FROM sites WHERE enabled AND via_local ORDER BY id`)) as Site[];
+  return rows.map(withDefaults);
 }
 
 /**
@@ -186,33 +206,45 @@ export async function addSite(
   selectors: Selectors,
   search: SiteSearch = { mode: "off" },
   enabled = true,
+  viaLocal = false,
 ): Promise<Site> {
-  const rows = (await sql()`
-    INSERT INTO sites (title, list_url, selectors, search, enabled)
-    VALUES (${title}, ${listUrl}, ${JSON.stringify(selectors)}::jsonb, ${JSON.stringify(search)}::jsonb, ${enabled})
-    RETURNING id, title, list_url, selectors, search, enabled, last_checked_at, last_error`) as Site[];
-  return withSearch(rows[0]);
+  const rows = (await withSchema(() => sql()`
+    INSERT INTO sites (title, list_url, selectors, search, enabled, via_local)
+    VALUES (${title}, ${listUrl}, ${JSON.stringify(selectors)}::jsonb, ${JSON.stringify(search)}::jsonb, ${enabled}, ${viaLocal})
+    RETURNING id, title, list_url, selectors, search, via_local, enabled, last_checked_at, last_error`)) as Site[];
+  return withDefaults(rows[0]);
+}
+
+/** Кто качает площадку: сервер или сборщик на компьютере владельца. */
+export async function setSiteViaLocal(id: number, viaLocal: boolean): Promise<void> {
+  await withSchema(() => sql()`UPDATE sites SET via_local = ${viaLocal} WHERE id = ${id}`);
 }
 
 /** Вёрстка площадки меняется — селекторы обновляем у той же строки, а не заводим второй сайт. */
 export async function setSiteSelectors(id: number, selectors: Selectors): Promise<void> {
-  await sql()`UPDATE sites SET selectors = ${JSON.stringify(selectors)}::jsonb WHERE id = ${id}`;
+  await withSchema(
+    () => sql()`UPDATE sites SET selectors = ${JSON.stringify(selectors)}::jsonb WHERE id = ${id}`,
+  );
 }
 
 export async function setSiteSearch(id: number, search: SiteSearch): Promise<void> {
-  await sql()`UPDATE sites SET search = ${JSON.stringify(search)}::jsonb WHERE id = ${id}`;
+  await withSchema(
+    () => sql()`UPDATE sites SET search = ${JSON.stringify(search)}::jsonb WHERE id = ${id}`,
+  );
 }
 
 export async function setSiteEnabled(id: number, enabled: boolean): Promise<void> {
-  await sql()`UPDATE sites SET enabled = ${enabled} WHERE id = ${id}`;
+  await withSchema(() => sql()`UPDATE sites SET enabled = ${enabled} WHERE id = ${id}`);
 }
 
 export async function deleteSite(id: number): Promise<void> {
-  await sql()`DELETE FROM sites WHERE id = ${id}`;
+  await withSchema(() => sql()`DELETE FROM sites WHERE id = ${id}`);
 }
 
 export async function markSiteChecked(id: number, error: string | null): Promise<void> {
-  await sql()`UPDATE sites SET last_checked_at = NOW(), last_error = ${error} WHERE id = ${id}`;
+  await withSchema(
+    () => sql()`UPDATE sites SET last_checked_at = NOW(), last_error = ${error} WHERE id = ${id}`,
+  );
 }
 
 /* ---------- ключевые слова ---------- */
@@ -253,6 +285,17 @@ export async function insertUnseen(
     ON CONFLICT (site_id, item_hash) DO NOTHING
     RETURNING item_hash`) as { item_hash: string }[];
   return new Set(rows.map((r) => r.item_hash));
+}
+
+/**
+ * Сколько позиций площадки уже помечено просмотренными. Ноль означает, что
+ * площадку ещё ни разу не разбирали: её первый сбор нужно засеять, а не
+ * разослать целиком.
+ */
+export async function countSeenItems(siteId: number): Promise<number> {
+  const rows = (await sql()`
+    SELECT COUNT(*) AS count FROM seen_items WHERE site_id = ${siteId}`) as { count: string }[];
+  return Number(rows[0].count);
 }
 
 export async function stats(): Promise<{

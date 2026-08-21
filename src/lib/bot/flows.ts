@@ -2,6 +2,7 @@ import type { Context } from "grammy";
 import { matchExample } from "../byexample";
 import { seedSite, type SeedResult } from "../checker";
 import { guessFields } from "../fieldguess";
+import { env } from "../env";
 import { detectFilterForms } from "../filters";
 import { matchText } from "../match";
 import { escapeHtml } from "../notify";
@@ -32,6 +33,7 @@ import {
   exampleFoundMessage,
   httpStatusFromError,
   learnByExampleMessage,
+  localSiteAddedText,
   MANUAL_HINT,
   MANUAL_RETRY,
   NOT_A_LINK_TEXT,
@@ -356,8 +358,30 @@ function formatSeedReport(seed: SeedResult): string {
  */
 export async function finishSiteAdd(
   ctx: Context,
-  params: { title: string; url: string; selectors: Selectors; search: SiteSearch },
+  params: {
+    title: string;
+    url: string;
+    selectors: Selectors;
+    search: SiteSearch;
+    /** Площадку читает программа на компьютере владельца, а не бот. */
+    viaLocal?: boolean;
+  },
 ): Promise<void> {
+  // Площадку домашнего сборщика включаем сразу: первый разбор ей делать нечем —
+  // с сервера она не открывается, — а выключенная она не попадёт в задания
+  // сборщику и не заработает даже после его установки.
+  if (params.viaLocal) {
+    await addSite(params.title, params.url, params.selectors, { mode: "off" }, true, true);
+    await clearState(ctx.from!.id);
+    // Владельцу показываем сами команды установки: идти за ними ему не к кому.
+    await ctx.reply(localSiteAddedText(params.title, env.ownerIds.includes(ctx.from!.id)), {
+      parse_mode: "HTML",
+      reply_markup: mainMenu(),
+      link_preview_options: { is_disabled: true },
+    });
+    return;
+  }
+
   const site = await addSite(params.title, params.url, params.selectors, params.search, false);
   await clearState(ctx.from!.id);
 

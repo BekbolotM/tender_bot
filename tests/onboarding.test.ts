@@ -72,6 +72,7 @@ function site(overrides: Partial<Site> = {}): Site {
     list_url: "https://demo.example.kg/tenders",
     selectors: { item: "div.card", title: "a", date: ".date" },
     search: { mode: "off" },
+    via_local: false,
     enabled: true,
     last_checked_at: null,
     last_error: null,

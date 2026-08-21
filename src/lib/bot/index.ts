@@ -27,6 +27,7 @@ import {
   listActiveInvites,
   listAdmins,
   listKeywords,
+  listLocalSites,
   listSites,
   redeemInvite,
   removeAdmin,
@@ -34,6 +35,7 @@ import {
   setSiteEnabled,
   setSiteSearch,
   setSiteSelectors,
+  setSiteViaLocal,
   setState,
   stats,
 } from "../repo";
@@ -67,10 +69,14 @@ import {
   CATALOG_ALREADY_ADDED,
   catalogFailed,
   catalogFound,
+  catalogLocalOnly,
   catalogMenu,
+  localCheckNote,
   sameListUrl,
   testFailedReport,
   testReport,
+  viaLocalSwitchedText,
+  VIA_LOCAL_TEST_TEXT,
 } from "./onboarding";
 import { startPayload } from "./startpayload";
 
@@ -227,9 +233,13 @@ const MANUAL_CHECK_DEADLINE_MS = 45_000;
 
 async function replyWithCheckResults(ctx: Context): Promise<void> {
   const results = await runCheck(ctx.api, MANUAL_CHECK_DEADLINE_MS);
+  // Площадки домашнего сборщика в прогон не входят: их приносит программа с
+  // компьютера владельца. Промолчать о них нельзя — иначе кнопка выглядела бы
+  // так, будто она их проверила и ничего не нашла.
+  const note = localCheckNote((await listLocalSites()).length);
 
   if (results.length === 0) {
-    await ctx.reply("Нет включённых сайтов.", { reply_markup: mainMenu() });
+    await ctx.reply(note ?? "Нет включённых сайтов.", { reply_markup: mainMenu() });
     return;
   }
 
@@ -239,6 +249,7 @@ async function replyWithCheckResults(ctx: Context): Promise<void> {
       : `✅ ${escapeHtml(result.site)}: найдено ${result.found}, новых ${result.fresh}, подошло ${result.notified}` +
         (result.warning ? `\n   ⚠️ ${escapeHtml(result.warning)}` : ""),
   );
+  if (note) lines.push("", note);
 
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: mainMenu() });
 }
@@ -353,6 +364,19 @@ function registerCallbacks(bot: Bot): void {
       return;
     }
 
+    // Площадку домашнего сборщика живьём не проверить: с сервера бот увидит не
+    // список, а проверку браузера, и человек решил бы, что она сломана.
+    if (entry.viaLocal) {
+      await ctx.answerCallbackQuery();
+      const local = catalogLocalOnly(entry);
+      await ctx.reply(local.text, {
+        parse_mode: "HTML",
+        reply_markup: local.keyboard,
+        link_preview_options: { is_disabled: true },
+      });
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: "Проверяю площадку…" });
 
     const page = await loadPage(entry.listUrl);
@@ -401,6 +425,7 @@ function registerCallbacks(bot: Bot): void {
       url: entry.listUrl,
       selectors: entry.selectors,
       search: entry.search ?? { mode: "off" },
+      viaLocal: entry.viaLocal,
     });
   });
 
@@ -568,6 +593,36 @@ function registerCallbacks(bot: Bot): void {
   });
 
   /**
+   * Переключает способ обхода площадки: читает её сервер или программа на
+   * компьютере владельца.
+   *
+   * Кнопка нужна потому, что площадка может начать показывать проверку браузера
+   * уже после добавления — и наоборот, перестать. Без неё починить такую
+   * площадку было бы нечем: повторное добавление из каталога бот отсекает как
+   * дубль, и строка навсегда осталась бы с прежним способом обхода — крон ходил
+   * бы на неё каждый прогон и каждый раз писал ошибку в карточку.
+   */
+  bot.callbackQuery(/^site_local:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const site = await getSite(id);
+    if (!site) {
+      await ctx.answerCallbackQuery({ text: "Сайт не найден" });
+      return;
+    }
+
+    const next = !site.via_local;
+    await setSiteViaLocal(id, next);
+    await ctx.answerCallbackQuery();
+
+    const { text, keyboard } = siteCard((await getSite(id))!);
+    await show(ctx, text, keyboard);
+    await ctx.reply(viaLocalSwitchedText(site.title, next), {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
+  });
+
+  /**
    * Правила разбора за отдельной кнопкой. На главном пути их не показываем —
    * строка вида `div.card > a` человеку ничего не говорит, — но при разборе
    * сложной площадки без них не обойтись.
@@ -608,6 +663,15 @@ function registerCallbacks(bot: Bot): void {
     const site = await getSite(Number(ctx.match[1]));
     if (!site) {
       await ctx.answerCallbackQuery({ text: "Сайт не найден" });
+      return;
+    }
+
+    // Такую площадку бот сам не открывает: список ему показывают только с
+    // компьютера владельца. Пробовать — значит показать человеку отказ площадки
+    // и оставить его думать, что всё сломалось.
+    if (site.via_local) {
+      await ctx.answerCallbackQuery();
+      await ctx.reply(VIA_LOCAL_TEST_TEXT, { parse_mode: "HTML" });
       return;
     }
 

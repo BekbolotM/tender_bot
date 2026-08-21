@@ -1,8 +1,20 @@
 import type { Api } from "grammy";
 import type { ScrapedItem, Site } from "./types";
 
+/**
+ * Экранирование для сообщений с parse_mode HTML. Кавычки экранируем наравне со
+ * скобками: тот же помощник подставляет чужой текст внутрь `href="…"`, и одна
+ * кавычка из вёрстки площадки (а страницы к нам приходят и от домашнего
+ * сборщика, то есть снаружи) закрывала бы атрибут раньше времени — Telegram
+ * либо отверг бы всё сообщение, либо увёл ссылку на чужой адрес.
+ */
 export function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function truncate(text: string, max: number): string {

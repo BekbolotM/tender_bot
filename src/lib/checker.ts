@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Api } from "grammy";
-import { matchText } from "./match";
+import { matchText, type MatchResult } from "./match";
 import { broadcast, formatItem, overflowMessage, partialCheckWarning } from "./notify";
 import {
   insertUnseen,
@@ -42,6 +42,87 @@ function itemHash(item: ScrapedItem): string {
   return createHash("sha256").update(item.url ?? item.title).digest("hex").slice(0, 32);
 }
 
+type Evaluated = { item: ScrapedItem; hash: string; match: MatchResult };
+
+/**
+ * Считает хэши, схлопывает дубли и прогоняет позиции через ключевые слова.
+ * Одно объявление легко попадает в разбор дважды — из выдачи поиска и со
+ * страницы списка, — поэтому дубли снимаем здесь, до записи в базу.
+ */
+function evaluateItems(items: ScrapedItem[], keywords: Keyword[]): Evaluated[] {
+  const byHash = new Map<string, Evaluated>();
+  for (const item of items) {
+    const hash = itemHash(item);
+    if (byHash.has(hash)) continue;
+    byHash.set(hash, { item, hash, match: matchText(`${item.title} ${item.text}`, keywords) });
+  }
+  return [...byHash.values()];
+}
+
+/** Записывает разобранное в «уже виденное» и возвращает хэши тех, кого там ещё не было. */
+function recordItems(siteId: number, evaluated: Evaluated[]): Promise<Set<string>> {
+  return insertUnseen(
+    siteId,
+    evaluated.map((entry) => ({
+      hash: entry.hash,
+      title: entry.item.title,
+      url: entry.item.url,
+      matched: entry.match.matched,
+    })),
+  );
+}
+
+/** Сколько позиций разобрано, сколько из них новых и о скольких сообщили. */
+export type ProcessResult = { found: number; fresh: number; notified: number };
+
+/**
+ * Общая середина мониторинга: отсеять по ключевым словам, запомнить новое,
+ * разослать подошедшее. Одинакова и для серверного обхода, и для страниц,
+ * присланных домашним сборщиком, — раздваивать её нельзя, иначе площадки с
+ * разным способом загрузки начали бы вести себя по-разному.
+ *
+ * Откуда взялся html, здесь уже не важно: на входе готовые позиции.
+ * Отметку о проверке ставит вызывающий — только он знает, всё ли прочитал.
+ */
+export async function processScrapedItems(
+  site: Site,
+  items: ScrapedItem[],
+  keywords: Keyword[],
+  targets: number[],
+  api: Api,
+): Promise<ProcessResult> {
+  const evaluated = evaluateItems(items, keywords);
+  const freshHashes = await recordItems(site.id, evaluated);
+
+  const toNotify = evaluated.filter((entry) => freshHashes.has(entry.hash) && entry.match.matched);
+
+  for (const entry of toNotify.slice(0, MAX_NOTIFICATIONS_PER_SITE)) {
+    await broadcast(api, targets, formatItem(site, entry.item, entry.match.hits));
+  }
+
+  const overflow = toNotify.length - MAX_NOTIFICATIONS_PER_SITE;
+  if (overflow > 0) await broadcast(api, targets, overflowMessage(site.title, overflow));
+
+  return { found: evaluated.length, fresh: freshHashes.size, notified: toNotify.length };
+}
+
+/**
+ * Первый разбор площадки домашнего сборщика: то же, что делает seedSite для
+ * обычных сайтов, только html уже принесли снаружи. Найденное помечается
+ * просмотренным без единой рассылки — иначе установка сборщика заканчивалась бы
+ * пачкой из полутора десятка сообщений про тендеры, которые владелец и так
+ * видел на сайте.
+ */
+export async function seedScrapedItems(
+  site: Site,
+  items: ScrapedItem[],
+  keywords: Keyword[],
+): Promise<ProcessResult> {
+  const evaluated = evaluateItems(items, keywords);
+  const freshHashes = await recordItems(site.id, evaluated);
+  return { found: evaluated.length, fresh: freshHashes.size, notified: 0 };
+}
+
 export type SiteResult = {
   site: string;
   found: number;
@@ -62,10 +143,8 @@ export function targetUrls(site: Site, keywords: Keyword[], limit = MAX_SEARCH_U
   return searchUrlsFor(site.search, positives, site.list_url, limit, offset);
 }
 
-type FoundItem = { item: ScrapedItem; hash: string };
-
 type Collected = {
-  items: FoundItem[];
+  items: ScrapedItem[];
   /** Сколько адресов не открылось: по ним покрытие ключевых слов потеряно. */
   failed: number;
   total: number;
@@ -118,7 +197,7 @@ async function collectItems(site: Site, urls: string[], deadlineAt: number): Pro
   if (byHash.size === 0 && errors.length > 0) throw new Error(errors[0]);
 
   return {
-    items: [...byHash].map(([hash, item]) => ({ hash, item })),
+    items: [...byHash.values()],
     failed: errors.length,
     total: visited,
     fallback: useFallback,
@@ -155,20 +234,9 @@ export async function seedSite(site: Site, deadlineMs = 45_000): Promise<SeedRes
     throw error;
   }
 
-  const evaluated = collected.items.map((entry) => ({
-    ...entry,
-    match: matchText(`${entry.item.title} ${entry.item.text}`, keywords),
-  }));
+  const evaluated = evaluateItems(collected.items, keywords);
 
-  await insertUnseen(
-    site.id,
-    evaluated.map((entry) => ({
-      hash: entry.hash,
-      title: entry.item.title,
-      url: entry.item.url,
-      matched: entry.match.matched,
-    })),
-  );
+  await recordItems(site.id, evaluated);
   await markSiteChecked(site.id, partialCheckWarning(collected));
 
   const matched = evaluated.filter((entry) => entry.match.matched);
@@ -189,43 +257,14 @@ async function checkSite(
   deadlineAt: number,
 ): Promise<SiteResult> {
   const collected = await collectItems(site, targetUrls(site, keywords), deadlineAt);
-
-  const evaluated = collected.items.map((entry) => ({
-    ...entry,
-    match: matchText(`${entry.item.title} ${entry.item.text}`, keywords),
-  }));
-
-  const freshHashes = await insertUnseen(
-    site.id,
-    evaluated.map((entry) => ({
-      hash: entry.hash,
-      title: entry.item.title,
-      url: entry.item.url,
-      matched: entry.match.matched,
-    })),
-  );
-
-  const toNotify = evaluated.filter((entry) => freshHashes.has(entry.hash) && entry.match.matched);
-
-  for (const entry of toNotify.slice(0, MAX_NOTIFICATIONS_PER_SITE)) {
-    await broadcast(api, targets, formatItem(site, entry.item, entry.match.hits));
-  }
-
-  const overflow = toNotify.length - MAX_NOTIFICATIONS_PER_SITE;
-  if (overflow > 0) await broadcast(api, targets, overflowMessage(site.title, overflow));
+  const processed = await processScrapedItems(site, collected.items, keywords, targets, api);
 
   // Частичный отказ не должен выглядеть как удачная проверка: иначе прошлая
   // ошибка стирается, и админ не узнает, что покрытие по словам просело.
   const warning = partialCheckWarning(collected);
   await markSiteChecked(site.id, warning);
 
-  return {
-    site: site.title,
-    found: collected.items.length,
-    fresh: freshHashes.size,
-    notified: toNotify.length,
-    ...(warning ? { warning } : {}),
-  };
+  return { site: site.title, ...processed, ...(warning ? { warning } : {}) };
 }
 
 /**
@@ -233,6 +272,10 @@ async function checkSite(
  * а дедлайн не даёт превысить лимит времени serverless-функции: он же
  * передаётся внутрь обхода сайта, потому что в режиме поиска один сайт —
  * это до восьми запросов, а не один.
+ *
+ * Площадки домашнего сборщика сервер пропускает молча: с адреса дата-центра
+ * они отдают проверку браузера, и каждый прогон вешал бы на карточку ошибку,
+ * затирая настоящий результат последнего сбора с компьютера владельца.
  */
 export async function runCheck(api: Api, deadlineMs = 240_000): Promise<SiteResult[]> {
   const deadlineAt = Date.now() + deadlineMs;
@@ -244,7 +287,7 @@ export async function runCheck(api: Api, deadlineMs = 240_000): Promise<SiteResu
 
   const results: SiteResult[] = [];
 
-  for (const site of sites.filter((s) => s.enabled)) {
+  for (const site of sites.filter((s) => s.enabled && !s.via_local)) {
     if (deadlineAt - Date.now() < MIN_SITE_BUDGET_MS) {
       results.push({
         site: site.title,

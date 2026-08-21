@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatItem, overflowMessage, partialCheckWarning } from "../src/lib/notify.ts";
+import { escapeHtml, formatItem, overflowMessage, partialCheckWarning } from "../src/lib/notify.ts";
 import type { ScrapedItem, Site } from "../src/lib/types.ts";
 
 const site: Site = {
@@ -9,6 +9,7 @@ const site: Site = {
   list_url: "https://zakupki.example.kg/tenders",
   selectors: { item: "div.card" },
   search: { mode: "off" },
+  via_local: false,
   enabled: true,
   last_checked_at: null,
   last_error: null,
@@ -38,6 +39,29 @@ test("уведомление о тендере не содержит сырых 
   assert.ok(text.includes("&lt;кровли&gt;"));
   assert.ok(text.includes('<a href="https://zakupki.example.kg/tender/5">'));
   assert.ok(text.includes("Госзакупки &lt;КР&gt;"));
+});
+
+test("кавычки экранируются наравне со скобками", () => {
+  // Тот же помощник подставляет чужой текст внутрь href="…". Кавычка из вёрстки
+  // площадки закрывала бы атрибут раньше времени, и Telegram отверг бы всё
+  // сообщение целиком — о найденном тендере никто бы не узнал.
+  assert.equal(escapeHtml(`a"b'c&d<e>f`), "a&quot;b&#39;c&amp;d&lt;e&gt;f");
+  assert.equal(escapeHtml("&lt;"), "&amp;lt;", "амперсанд экранируется первым, иначе выйдет каша");
+});
+
+test("кавычка в ссылке не разрывает тег со ссылкой", () => {
+  const text = formatItem(
+    site,
+    item({ url: `https://zakupki.example.kg/t/5?q="><script>` }),
+    [],
+  );
+
+  // Открывающий тег обязан закончиться там, где мы его закрыли, — и ни одного
+  // сырого `"` внутри значения атрибута.
+  const href = /<a href="([^"]*)">/.exec(text);
+  assert.ok(href, `ссылка должна остаться цельным тегом:\n${text}`);
+  assert.ok(!href[1].includes('"'));
+  assert.ok(!text.includes("<script>"));
 });
 
 test("позиция без ссылки уведомление не ломает", () => {

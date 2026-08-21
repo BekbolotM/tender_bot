@@ -4,7 +4,14 @@ import { escapeHtml } from "../notify.ts";
 import { page, PAGE_SIZE, type Page } from "../paginate.ts";
 import type { Keyword, Site, SiteSearch } from "../types";
 import { inviteButtons, inviteHint } from "./invitemenu.ts";
-import { CB, lastErrorLine, searchModeText, siteFieldsLine } from "./onboarding.ts";
+import {
+  CB,
+  lastErrorLine,
+  localStaleLine,
+  searchModeText,
+  siteFieldsLine,
+  VIA_LOCAL_LINE,
+} from "./onboarding.ts";
 
 export const MAIN_MENU_TEXT =
   "<b>Тендер-бот</b>\nСледит за площадками и присылает тендеры по ключевым словам.";
@@ -60,7 +67,10 @@ export function searchModeLabel(search: SiteSearch): string {
   return searchModeText(search);
 }
 
-export function siteCard(site: Site): { text: string; keyboard: InlineKeyboard } {
+export function siteCard(
+  site: Site,
+  now: number = Date.now(),
+): { text: string; keyboard: InlineKeyboard } {
   const checked = site.last_checked_at
     ? new Date(site.last_checked_at).toLocaleString("ru-RU", { timeZone: "UTC" }) + " UTC"
     : "ещё не проверялся";
@@ -75,15 +85,34 @@ export function siteCard(site: Site): { text: string; keyboard: InlineKeyboard }
     `Показываю: ${siteFieldsLine(site.selectors)}`,
     `Режим: ${searchModeLabel(site.search)}`,
   ];
+  // Про способ обхода говорим только там, где он необычный: у остальных площадок
+  // строка «читаю сам» ничего не добавляет, а карточку удлиняет.
+  if (site.via_local) lines.push(VIA_LOCAL_LINE);
   if (site.last_error) lines.push(lastErrorLine(site.last_error));
+  // Молчащий домашний сбор виден только здесь: сам он о себе не напомнит.
+  const stale = localStaleLine(site, now);
+  if (stale) lines.push(stale);
 
   const keyboard = new InlineKeyboard()
     .text(site.enabled ? "⛔ Выключить" : "✅ Включить", `site_toggle:${site.id}`)
-    .text("🧪 Проверить", `site_test:${site.id}`).row()
-    .text(
+    .text("🧪 Проверить", `site_test:${site.id}`).row();
+  // Поиск на стороне площадки ведёт к её же страницам, а их бот и не открывает:
+  // с вашего компьютера приходит только страница списка. Кнопка была бы обманом.
+  if (!site.via_local) {
+    keyboard.text(
       site.search.mode === "query" ? "🔁 Читать весь список" : "🔎 Искать через сайт",
       `site_search_toggle:${site.id}`,
-    ).row()
+    ).row();
+  }
+  // Площадка может начать показывать проверку браузера уже после добавления —
+  // и наоборот. Без этой кнопки переключить способ обхода было бы нечем:
+  // повторное добавление из каталога бот отсекает как дубль.
+  keyboard
+    .text(
+      site.via_local ? "🌍 Читать без моего компьютера" : "💻 Читать с моего компьютера",
+      `site_local:${site.id}`,
+    ).row();
+  keyboard
     .text("⚙️ Подробности для продвинутых", `site_raw:${site.id}`).row()
     .text("🗑 Удалить", `site_del:${site.id}`).row()
     .text("⬅️ К сайтам", "sites");

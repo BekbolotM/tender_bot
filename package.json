@@ -8,7 +8,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
-    "bot:local": "tsx --env-file=.env.local scripts/dev-bot.ts"
+    "bot:local": "tsx --env-file=.env.local scripts/dev-bot.ts",
+    "collect": "tsx scripts/collector.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",

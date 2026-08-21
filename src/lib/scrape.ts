@@ -91,7 +91,12 @@ function absoluteUrl(href: string | undefined, baseUrl: string): string | null {
   if (!href) return null;
   try {
     const url = new URL(href, baseUrl);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    // Имя хоста не проходит процентное кодирование: кавычка внутри него доживает
+    // до `href="…"` в уведомлении и рвёт тег. Настоящее доменное имя (в том числе
+    // записанное punycode) состоит только из букв, цифр, точки и дефиса.
+    if (!/^[a-z0-9.-]+$/.test(url.hostname)) return null;
+    return url.toString();
   } catch {
     return null;
   }
